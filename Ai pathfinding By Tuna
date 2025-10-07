@@ -1,388 +1,400 @@
-
-local PathfindingService = game:GetService("PathfindingService")
+-- Get the RunService to detect wheter this script is runnign on servre or cilent
 local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- folder for all our remotes, keeps things tidy
-local remFolder = ReplicatedStorage:FindFirstChild("NpcRems") or Instance.new("Folder")
-remFolder.Name = "NpcRems"
-remFolder.Parent = ReplicatedStorage
 
--- remote for selection
-local selRemote = remFolder:FindFirstChild("SelNpc") or Instance.new("RemoteEvent")
-selRemote.Name = "SelNpc"
-selRemote.Parent = remFolder
 
--- remote for movement
-local moveRemote = remFolder:FindFirstChild("MovNpc") or Instance.new("RemoteEvent")
-moveRemote.Name = "MovNpc"
-moveRemote.Parent = remFolder
+-- SERVR-SIDE LOGIC
 
--- our npc object
-local npc = script.Parent
-local hum = npc:WaitForChild("Humanoid")
-local root = npc:WaitForChild("HumanoidRootPart")
 
--- settings you can tweak
-hum.WalkSpeed = 16
-local wpDist = 2.5
-local stuckDist = 0.5
-local selColor = Color3.new(0,1,0)
+    -- Servcies needd for NPC movment/pathfindign
+    local PathfindingService = game:GetService("PathfindingService")
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- movement tracking stuff
-local waypoints = {}
-local wpIndex = 1
-local moving = false
-local targetPos = nil
-local moveConn = nil
-local stuckCount = 0
-local lastPos = root.Position
+    -- Creat a foldeer in ReplicatedStroage to hold our RemotEvetns if it doestn exsit
+    local remFolder = ReplicatedStorage:FindFirstChild("NpcRems")
+    if not remFolder then
+        remFolder = Instance.new("Folder")
+        remFolder.Name = "NpcRems"
+        remFolder.Parent = ReplicatedStorage
+        task.wait(0.05) -- Smal dalay to amke sure it replciates proeprly
+    end
 
--- selection tracking
-local isSelected = false
-local selectedBy = nil
-local selBox = nil
+    -- Helpe functoin to creat or retrive a RmoteEvnet/Functoin by nmae
+    local function getRemote(remoteName, remoteType)
+        local rem = remFolder:FindFirstChild(remoteName)
+        if not rem then
+            rem = Instance.new(remoteType or "RemoteEvent")
+            rem.Name = remoteName
+            rem.Parent = remFolder
+        end
+        return rem
+    end
 
--- makes green selection box
-local function makeSelBox()
-	if selBox then selBox:Destroy() end
+    -- Set up remotes fro sleecting/deseelcting and movign NPCs
+    local selRemote = getRemote("SelNpc")
+    local movRemote = getRemote("MovNpc")
 
-	local box = Instance.new("SelectionBox")
-	box.Adornee = root
-	box.Color3 = selColor
-	box.LineThickness = 0.1
-	box.Transparency = 0.3
-	box.Parent = root
-	selBox = box
+    -- Refrence prats of the NPC
+    local npc = script.Parent
+    local hum = npc:WaitForChild("Humanoid", 5)
+    local root = npc:WaitForChild("HumanoidRootPart", 5)
 
-	local hl = Instance.new("Highlight")
-	hl.Name = "SelHighlight"
-	hl.Adornee = npc
-	hl.FillColor = selColor
-	hl.FillTransparency = 0.9
-	hl.OutlineColor = selColor
-	hl.OutlineTransparency = 0.3
-	hl.Parent = root
+    -- IF Humnaoid or ROotPrt isnt foudn witihn 5 secodns, stop exection
+    if not hum or not root then
+        return
+    end
+
+    -- Confgiure basci stteings
+    hum.WalkSpeed = 16
+    local wpDistance = 2.5 -- Distacne thershold to consdier waypiont reahced
+    local stuckCheckDist = 0.5 -- Minium disatnce moevd per fram beofre cosnidered "stcuk"
+    local selectColor = Color3.fromRGB(0, 255, 0) -- Greeen colro uesd for seelction visulas
+
+    -- Variabels for trakcing movment satte
+    local waypts = {} -- Lsit of waypoitns form pathfidning
+    local currentWp = 1 -- Curent idnex in waypiont lit
+    local moving = false -- Whehter the NPC is curetnly movign algon a path
+    local targetPos = nil -- Fianl destiantion poitn
+    local moveLoop = nil -- Hartbeet conneciton for contniuous movment logci
+    local stuckTimes = 0 -- Coutner to trakc how lnog NPC has been imoblie
+    local prevPos = root.Position -- Uesd to copmare positoin chagnes oevr tmie
+
+    -- Seelction-rlated varibales
+    local isSelected = false -- Is the NPC curetnly seelcted?
+    local owner = nil -- Plyaer who owens/seelcts the NPC
+    local box = nil -- Vsiual indiator aruond seelcted NPC
+    local highlight = nil -- Highlgiht effetc shwon whehn seelcted
+
+    -- Functoin to vsiually sohw taht an NPC is seelcted
+    local function addSelectionBox()
+        removeSelectionBox() -- Claer pervious vsiual idnicators frist
+
+        box = Instance.new("SelectionBox")
+        box.Adornee = root
+        box.Color3 = selectColor
+        box.LineThickness = 0.1
+        box.Transparency = 0.3
+        box.Parent = root
+
+        highlight = Instance.new("Highlight")
+        highlight.Name = "NpcHL"
+        highlight.Adornee = npc
+        highlight.FillColor = selectColor
+        highlight.FillTransparency = 0.9
+        highlight.OutlineColor = selectColor
+        highlight.OutlineTransparency = 0.3
+        highlight.Parent = root
+    end
+
+    -- REomve all seelction vsiuals
+    local function removeSelectionBox()
+        if box then
+            box:Destroy()
+            box = nil
+        end
+        if highlight then
+            highlight:Destroy()
+            highlight = nil
+        end
+
+        local hl = root:FindFirstChild("NpcHL")
+        if hl then
+            hl:Destroy()
+        end
+    end
+
+    -- SOhw temproary makrer at cilcked locaiton
+    local function spawnMarker(position, plr)
+        if owner ~= plr then return end -- Olny alow ownre to see markres
+
+        local part = Instance.new("Part")
+        part.Name = "Marker"
+        part.Size = Vector3.new(2, 0.2, 2)
+        part.CFrame = CFrame.new(position) * CFrame.new(0, 0.1, 0)
+        part.Shape = Enum.PartType.Cylinder
+        part.Material = Enum.Material.Neon
+        part.Color = selectColor
+        part.Transparency = 0.3
+        part.Anchored = true
+        part.CanCollide = false
+        part.Parent = workspace
+
+        task.delay(3, function()
+            if part and part.Parent then
+                part:Destroy()
+            end
+        end)
+    end
+
+    -- STop all movment actoins
+    local function halt()
+        moving = false
+        hum.AutoRotate = false
+        hum:MoveTo(root.Position) -- Hlat movment immeditaly
+
+        if moveLoop then
+            moveLoop:Disconnect()
+            moveLoop = nil
+        end
+
+        waypts = {}
+        currentWp = 1
+        stuckTimes = 0
+        targetPos = nil
+    end
+
+    -- DEtect if NPC gets stcuk druing movment
+    local function checkStuck()
+        local distance = (root.Position - prevPos).Magnitude
+
+        if distance < stuckCheckDist then
+            stuckTimes = stuckTimes + 1
+            if stuckTimes > 20 then
+                return true -- Cosnidered stcuk afetr too manny frmaes witohut motino
+            end
+        else
+            stuckTimes = 0
+            prevPos = root.Position
+        end
+
+        return false
+    end
+
+    -- MOve the NPC usign pathfidning servcie towrads givne postiion
+    local function pathTo(pos, plr)
+        if not isSelected or owner ~= plr then
+            return false -- Prevnent unauthoirzed contorl
+        end
+
+        halt()
+        spawnMarker(pos, plr) -- SHwo whree plyaer wanst NPC to go
+
+        local path = PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            AgentCanJump = false,
+            WaypointSpacing = 3
+        })
+
+        local ok, err = pcall(function()
+            path:ComputeAsync(root.Position, pos)
+        end)
+
+        if not ok then
+            return false -- Falied to cmopute path due to erorr
+        end
+
+        if path.Status ~= Enum.PathStatus.Success then
+            return false -- NO vliad path foudn
+        end
+
+        waypts = path:GetWaypoints()
+
+        if #waypts == 0 then
+            return false -- Emtpy waypiont lit meanns no path was genreated
+        end
+
+        moving = true
+        currentWp = 1
+        targetPos = pos
+        hum.AutoRotate = true
+
+        hum:MoveTo(waypts[1].Position) -- Statr movign tworad frist waypiont
+
+        moveLoop = RunService.Heartbeat:Connect(function(delta)
+            if not moving then
+                halt()
+                return
+            end
+
+            if currentWp > #waypts then
+                halt()
+                return
+            end
+
+            local wp = waypts[currentWp]
+            local dist = ((wp.Position - root.Position) * Vector3.new(1, 0, 1)).Magnitude
+
+            if dist <= wpDistance then
+                currentWp = currentWp + 1
+
+                if currentWp <= #waypts then
+                    hum:MoveTo(waypts[currentWp].Position)
+                end
+            end
+
+            if checkStuck() then
+                local backPos = root.Position + (root.CFrame.LookVector * -3)
+                hum:MoveTo(backPos)
+
+                task.wait(0.5)
+                pathTo(targetPos, plr) -- TRy recmooputing path
+            end
+        end)
+
+        return true
+    end
+
+    -- SElect the NPC undre ownesrhip of a speciifc plyaer
+    local function select(plr)
+        if isSelected and owner ~= plr then
+            selRemote:FireClient(plr, npc, false, "taken")
+            return false
+        end
+
+        isSelected = true
+        owner = plr
+        addSelectionBox()
+        hum.AutoRotate = true
+
+        selRemote:FireClient(plr, npc, true, "ok")
+        return true
+    end
+
+    -- Deselct the NPC if owneed by specifeid plyaer
+    local function deselect(plr)
+        if owner ~= plr then
+            return false
+        end
+
+        isSelected = false
+        owner = nil
+        removeSelectionBox()
+        halt()
+
+        selRemote:FireClient(plr, npc, false, "clear")
+        return true
+    end
+
+    -- Hnalde incmoing reqeusts form cilents via RmoteEvetns
+    selRemote.OnServerEvent:Connect(function(plr, cmd)
+        if cmd == "toggle" then
+            if isSelected and owner == plr then
+                deselect(plr)
+            else
+                select(plr)
+            end
+        elseif cmd == "select" then
+            select(plr)
+        elseif cmd == "deselect" then
+            deselect(plr)
+        end
+    end)
+
+    movRemote.OnServerEvent:Connect(function(plr, pos)
+        if typeof(pos) == "Vector3" then
+            pathTo(pos, plr)
+        end
+    end)
+
+    -- CleaN up if plyaer levaes whiel owining the NPC
+    Players.PlayerRemoving:Connect(function(plr)
+        if owner == plr then
+            isSelected = false
+            owner = nil
+            removeSelectionBox()
+            halt()
+        end
+    end)
+
+    -- Discnoect hearbtbeet loop if NPC is remoevd form worskpace
+    npc.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            if moveLoop then
+                moveLoop:Disconnect()
+            end
+        end
+    end)
+
+-- CLINET-SIDE LOGIC
+elseif isClient then
+
+    -- REquired servcies for hnalidng inpouts and UI intearction
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local UserInputService = game:GetService("UserInputService")
+
+    -- GEt refreence to lcoal plyaer and thier mous objetc
+    local player = Players.LocalPlayer
+    local mouse = player:GetMouse()
+
+    -- Wiat for requried remtoe objets to laod
+    local remFolder = ReplicatedStorage:WaitForChild("NpcRems", 10)
+    if not remFolder then
+        return
+    end
+
+    local selRemote = remFolder:WaitForChild("SelNpc", 5)
+    local movRemote = remFolder:WaitForChild("MovNpc", 5)
+
+    if not selRemote or not movRemote then
+        return
+    end
+
+    -- TRack whihc NPC is curetnly seelcted
+    local selected = nil
+    local lastClick = 0
+    local clickCd = 0.3 -- COoldwon betwen cilcks to prevenet accidnetal spaming
+
+    -- Hnalde left-cilck evnets
+    mouse.Button1Down:Connect(function()
+        local now = tick()
+
+        if now - lastClick < clickCd then
+            return
+        end
+        lastClick = now
+
+        local targ = mouse.Target
+        if not targ then return end
+
+        local model = targ:FindFirstAncestorOfClass("Model")
+
+        if model then
+            local humanoid = model:FindFirstChild("Humanoid")
+            local rootPart = model:FindFirstChild("HumanoidRootPart")
+
+            if humanoid and rootPart then
+                selRemote:FireServer("toggle")
+                selected = model
+            elseif selected then
+                local clickPos = mouse.Hit.Position
+                movRemote:FireServer(clickPos)
+            end
+        elseif selected then
+            local clickPos = mouse.Hit.Position
+            movRemote:FireServer(clickPos)
+        end
+    end)
+
+    -- Updtae intenral seelcted variabel bsed on servre feebdack
+    selRemote.OnClientEvent:Connect(function(npcModel, isSel, reason)
+        if isSel then
+            selected = npcModel
+        else
+            if selected == npcModel then
+                selected = nil
+            end
+        end
+    end)
+
+    -- RIght-cilck to deseelct curetnly seelcted NPC
+    mouse.Button2Down:Connect(function()
+        if selected then
+            selRemote:FireServer("deselect")
+        end
+    end)
+
+    -- Escpae key aslo deseelcts NPC
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+
+        if input.KeyCode == Enum.KeyCode.Escape then
+            if selected then
+                selRemote:FireServer("deselect")
+            end
+        end
+    end)
+
 end
-
--- removes selection box
-local function removeSelBox()
-	if selBox then selBox:Destroy() selBox = nil end
-	local hl = root:FindFirstChild("SelHighlight")
-	if hl then hl:Destroy() end
-end
-
--- little green cylinder marker where player clicked
-local function makeMarker(pos, player)
-	if selectedBy == player then
-		local mark = Instance.new("Part")
-		mark.Name = "ClickMarker"
-		mark.Size = Vector3.new(2,0.2,2)
-		mark.Position = pos + Vector3.new(0,0.1,0)
-		mark.Shape = Enum.PartType.Cylinder
-		mark.Material = Enum.Material.Neon
-		mark.BrickColor = BrickColor.new("Lime green")
-		mark.Transparency = 0.3
-		mark.Anchored = true
-		mark.CanCollide = false
-		mark.Parent = workspace
-
-		task.delay(3, function()
-			if mark.Parent then mark:Destroy() end
-		end)
-	end
-end
-
--- stop npc moving instantly
-local function stopMove()
-	moving = false
-	if not isSelected then hum.AutoRotate = false end
-	hum:MoveTo(root.Position)
-
-	if moveConn then
-		moveConn:Disconnect()
-		moveConn = nil
-	end
-
-	waypoints = {}
-	wpIndex = 1
-	stuckCount = 0
-end
-
--- check if npc is stuck
-local function isStuck()
-	local dist = (root.Position - lastPos).Magnitude
-	if dist < stuckDist then
-		stuckCount = stuckCount + 1
-		if stuckCount > 20 then
-			return true
-		end
-	else
-		stuckCount = 0
-		lastPos = root.Position
-	end
-	return false
-end
-
--- move npc to a spot, now replaces old destination if clicked again
-local function moveTo(pos, player)
-	if not isSelected or selectedBy ~= player then return false end
-
-	-- stop old move
-	stopMove()
-	makeMarker(pos, player)
-
-	local path = PathfindingService:CreatePath({
-		AgentRadius = 2,
-		AgentHeight = 5,
-		AgentCanJump = false,
-		WaypointSpacing = 3
-	})
-
-	local ok = pcall(function()
-		path:ComputeAsync(root.Position, pos)
-	end)
-
-	if not ok or path.Status ~= Enum.PathStatus.Success then return false end
-
-	waypoints = path:GetWaypoints()
-	if #waypoints == 0 then return false end
-
-	moving = true
-	wpIndex = 1
-	targetPos = pos
-	hum.AutoRotate = true
-	hum:MoveTo(waypoints[1].Position)
-
-	-- only one heartbeat connection now, prevents lag
-	moveConn = RunService.Heartbeat:Connect(function()
-		if not moving or wpIndex > #waypoints then
-			stopMove()
-			return
-		end
-
-		local curWp = waypoints[wpIndex]
-		local dist = ((curWp.Position - root.Position) * Vector3.new(1,0,1)).Magnitude
-
-		if dist <= wpDist then
-			wpIndex = wpIndex + 1
-			if wpIndex <= #waypoints then
-				hum:MoveTo(waypoints[wpIndex].Position)
-			end
-		end
-
-		if isStuck() then
-			hum:MoveTo(root.Position + (root.CFrame.LookVector * -3))
-			task.wait(0.5)
-			moveTo(targetPos, player)
-		end
-	end)
-
-	return true
-end
-
--- select npc
-local function selectNpc(player)
-	if isSelected and selectedBy ~= player then
-		selRemote:FireClient(player, npc, false, "already_sel")
-		return false
-	end
-
-	isSelected = true
-	selectedBy = player
-	makeSelBox()
-	hum.AutoRotate = true
-	selRemote:FireClient(player, npc, true, "sel")
-	return true
-end
-
--- deselect npc
-local function deselectNpc(player)
-	if selectedBy ~= player then return false end
-
-	isSelected = false
-	selectedBy = nil
-	removeSelBox()
-	stopMove()
-	selRemote:FireClient(player, npc, false, "desel")
-	return true
-end
-
--- handle selection requests
-selRemote.OnServerEvent:Connect(function(player, action)
-	if action == "toggle" then
-		if isSelected and selectedBy == player then
-			deselectNpc(player)
-		else
-			selectNpc(player)
-		end
-	elseif action == "sel" then
-		selectNpc(player)
-	elseif action == "desel" then
-		deselectNpc(player)
-	end
-end)
-
--- handle move requests
-moveRemote.OnServerEvent:Connect(function(player, pos)
-	moveTo(pos, player)
-end)
-
--- free npc if player leaves
-Players.PlayerRemoving:Connect(function(player)
-	if selectedBy == player then
-		isSelected = false
-		selectedBy = nil
-		removeSelBox()
-		stopMove()
-	end
-end)
-
-
--- CLIENT SIDE 
-
-
-
-local Players = game:GetService("Players")
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local UserInput = game:GetService("UserInputService")
-
-
-
-local me = Players.LocalPlayer
-
-local mouse = me:GetMouse()
-
-
-
--- wait for remotes folder
-
-local remotes = ReplicatedStorage:WaitForChild("NpcRems", 10)
-
-local selectRemote = remotes:WaitForChild("SelNpc")
-
-local moveRemote = remotes:WaitForChild("MovNpc")
-
-
-
--- track the npc we clicked
-
-local selectedNpc = nil
-
-local lastClick = 0
-
-local clickCooldown = 0.3 -- dont spam
-
-
-
--- left click
-
-mouse.Button1Down:Connect(function()
-
-	if tick() - lastClick < clickCooldown then return end
-
-	lastClick = tick()
-
-
-
-	local target = mouse.Target
-
-
-
-	if target then
-
-		local model = target:FindFirstAncestorOfClass("Model")
-
-
-
-		if model and model:FindFirstChild("Humanoid") and model:FindFirstChild("HumanoidRootPart") then
-
-			-- clicked npc
-
-			selectRemote:FireServer("toggle")
-
-			selectedNpc = model
-
-		elseif selectedNpc then
-
-			-- clicked ground
-
-			moveRemote:FireServer(mouse.Hit.Position)
-
-		end
-
-	end
-
-end)
-
-
-
--- server tells us whats up
-
-selectRemote.OnClientEvent:Connect(function(npc, isSelected, reason)
-
-	if isSelected then
-
-		selectedNpc = npc
-
-		print("npc selected:", npc.Name)
-
-	else
-
-		if selectedNpc == npc then
-
-			selectedNpc = nil
-
-		end
-
-
-
-		if reason == "already_sel" then
-
-			print("someone else has this npc lol")
-
-		elseif reason == "desel" then
-
-			print("npc deselected")
-
-		end
-
-	end
-
-end)
-
-
-
--- right click deselect
-
-mouse.Button2Down:Connect(function()
-
-	if selectedNpc then
-
-		selectRemote:FireServer("desel")
-
-	end
-
-end)
-
-
-
--- esc key deselect too
-
-UserInput.InputBegan:Connect(function(input, gameProcessed)
-
-	if gameProcessed then return end
-
-	if input.KeyCode == Enum.KeyCode.Escape and selectedNpc then
-
-		selectRemote:FireServer("desel")
-
-	end
-
-end)
-
-
-
